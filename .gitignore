@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+*.egg-info/
+
+# Per-machine calibration (screen positions and screenshots are specific to each setup)
+config.json
+template.png
+calibration_screenshot.png
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
