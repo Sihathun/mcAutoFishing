@@ -1,6 +1,6 @@
 # AutoFishing
 
-A Python auto-fisher for Minecraft (Java Edition, tested on Cobbleverse). It reads Minecraft's on-screen **subtitles**, and when it sees **"Fishing Bobber splashes"** it right-clicks to reel in and right-clicks again to recast.
+A Python auto-fisher for Minecraft (Java Edition). It reads Minecraft's on-screen **subtitles**, and when it sees **"Fishing Bobber splashes"** it right-clicks to reel in and right-clicks again to recast.
 
 It only looks at your screen and sends mouse clicks. It does not modify the game or read its memory.
 
@@ -17,8 +17,8 @@ It only looks at your screen and sends mouse clicks. It does not modify the game
 1. **Get the code**
 
    ```bash
-   git clone <your-repo-url>
-   cd AutoFishing
+   git clone https://github.com/Sihathun/mcAutoFishing.git
+   cd mcAutoFishing
    ```
 
 2. **(Optional) Create a virtual environment**
