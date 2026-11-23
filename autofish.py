@@ -4,22 +4,26 @@ Minecraft auto-fisher driven by the "Fishing Bobber splashes" subtitle.
 How it works
 ------------
 Minecraft's Subtitles accessibility option prints every sound as text on screen.
-The script watches that part of the screen, and when the line
+The bot watches that part of the screen, and when the line
 "Fishing Bobber splashes" appears it right-clicks to reel in and right-clicks
 again to recast.
 
-Usage
------
-1. In Minecraft:  Options > Accessibility Settings > Show Subtitles = ON
-   (Run the game in windowed / borderless-fullscreen mode, not exclusive fullscreen.)
-2. python autofish.py calibrate    # one time, teaches the script what the line looks like
-3. python autofish.py run          # then switch to Minecraft with the rod in your hand
+This module holds the core logic (screen capture, matching, the FishingBot loop,
+calibration helpers) plus a small command-line interface. The graphical app lives
+in gui.py and reuses everything here.
 
-Hotkeys while running:  F7 = pause/resume   F8 = quit
+Command line usage
+------------------
+    python autofish.py calibrate    # one time, teaches the bot what the line looks like
+    python autofish.py run          # then switch to Minecraft with the rod in your hand
+
+Hotkeys (CLI):  F7 = pause/resume   F8 = quit
 """
 import argparse
+import ctypes
 import json
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -29,21 +33,71 @@ import mss
 import numpy as np
 import pyautogui
 
-CONFIG_PATH = Path(__file__).with_name("config.json")
-TEMPLATE_PATH = Path(__file__).with_name("template.png")
+BASE_DIR = Path(__file__).resolve().parent
+CONFIG_PATH = BASE_DIR / "config.json"
+TEMPLATE_PATH = BASE_DIR / "template.png"
+SCREENSHOT_PATH = BASE_DIR / "calibration_screenshot.png"
 
 DEFAULTS = {
-    "region": None,          # [left, top, width, height] of the subtitle area on screen
+    "region": None,           # [left, top, width, height] of the subtitle area on screen
     "match_threshold": 0.80,  # 0..1, how closely the line must match the template
-    "reel_delay": 0.15,      # seconds between detection and reeling in
-    "recast_delay": 1.0,     # seconds between reel-in and recast
-    "cooldown": 4.0,         # seconds to ignore the screen after a catch (subtitle lingers ~3s)
-    "poll_interval": 0.05,   # seconds between screen checks
-    "monitor": 0,            # mss monitor index (0 = all monitors combined)
+    "reel_delay": 0.15,       # seconds between detection and reeling in
+    "recast_delay": 1.0,      # seconds between reel-in and recast
+    "cooldown": 4.0,          # seconds to ignore the screen after a catch (subtitle lingers ~3s)
+    "poll_interval": 0.05,    # seconds between screen checks
+    "start_delay": 5,         # seconds to switch to Minecraft after pressing Start
+    "monitor": 0,             # mss monitor index (0 = all monitors combined)
+    "require_focus": True,    # only click while the Minecraft window is focused
+    "window_title": "Minecraft",  # text the focused window's title must contain
 }
+
+# mss renamed mss.mss -> mss.MSS in newer releases; support both.
+MSS = getattr(mss, "MSS", None) or mss.mss
 
 pyautogui.PAUSE = 0
 pyautogui.FAILSAFE = True  # slam the mouse into a screen corner to abort
+
+
+# --------------------------------------------------------------------------- #
+# Files / config
+# --------------------------------------------------------------------------- #
+def read_image(path: Path, flags: int = cv2.IMREAD_COLOR):
+    """cv2.imread that also works with non-ASCII Windows paths. Returns None if unreadable."""
+    try:
+        data = np.fromfile(str(path), dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
+def write_image(path: Path, img: np.ndarray) -> None:
+    ok, buf = cv2.imencode(Path(path).suffix or ".png", img)
+    if not ok:
+        raise OSError(f"Could not encode image for {path}")
+    buf.tofile(str(path))
+
+
+def load_config() -> dict:
+    cfg = dict(DEFAULTS)
+    if CONFIG_PATH.exists():
+        try:
+            cfg.update(json.loads(CONFIG_PATH.read_text()))
+        except (OSError, ValueError):
+            pass  # unreadable config -> fall back to defaults
+    return cfg
+
+
+def save_config(cfg: dict) -> None:
+    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+
+
+def load_template():
+    """The saved gray image of the splash line, or None if not calibrated yet."""
+    if not TEMPLATE_PATH.exists():
+        return None
+    return read_image(TEMPLATE_PATH, cv2.IMREAD_GRAYSCALE)
 
 
 # --------------------------------------------------------------------------- #
@@ -69,7 +123,7 @@ def match_score(region_bgr: np.ndarray, template_gray: np.ndarray) -> float:
     return float(result.max())
 
 
-def grab(sct: mss.mss, monitor_idx: int, region=None) -> np.ndarray:
+def grab(sct, monitor_idx: int, region=None) -> np.ndarray:
     mon = sct.monitors[monitor_idx]
     if region:
         left, top, w, h = region
@@ -79,16 +133,45 @@ def grab(sct: mss.mss, monitor_idx: int, region=None) -> np.ndarray:
     return np.ascontiguousarray(np.array(sct.grab(box))[:, :, :3])  # BGRA -> BGR
 
 
-def load_config() -> dict:
-    cfg = dict(DEFAULTS)
-    if CONFIG_PATH.exists():
-        cfg.update(json.loads(CONFIG_PATH.read_text()))
-    return cfg
+def desktop_screenshot() -> np.ndarray:
+    """Screenshot of ALL monitors stitched together (mss monitor 0)."""
+    with MSS() as sct:
+        return grab(sct, 0)
+
+
+def foreground_window_title() -> str:
+    """Title of the window that currently has focus ('' if unknown / not Windows)."""
+    if sys.platform != "win32":
+        return ""
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    length = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
 
 
 # --------------------------------------------------------------------------- #
-# Calibration
+# Calibration helpers (shared by the CLI and the GUI)
 # --------------------------------------------------------------------------- #
+def extract_template(area_bgr: np.ndarray, box) -> np.ndarray:
+    """Cut the splash line out of the subtitle area. Raises ValueError if it looks empty."""
+    x, y, w, h = box
+    if w <= 0 or h <= 0:
+        raise ValueError("No text selected.")
+    template = to_gray(area_bgr[y:y + h, x:x + w])
+    if template.size == 0 or template.std() < 5:
+        raise ValueError("The selected box has no visible text in it. Select a tighter box on the text.")
+    return template
+
+
+def save_calibration(cfg: dict, region, template: np.ndarray) -> None:
+    cfg["region"] = [int(v) for v in region]
+    cfg["monitor"] = 0  # region coordinates are relative to the all-monitors capture
+    write_image(TEMPLATE_PATH, template)
+    save_config(cfg)
+
+
 def select_roi(title: str, img: np.ndarray, max_w: int = 1600, max_h: int = 900) -> tuple[int, int, int, int]:
     """cv2.selectROI that shrinks big images to fit the screen but returns full-size coordinates."""
     scale = min(3.0, max_w / img.shape[1], max_h / img.shape[0])  # shrink big images, enlarge small ones
@@ -103,99 +186,227 @@ def select_roi(title: str, img: np.ndarray, max_w: int = 1600, max_h: int = 900)
 
 
 def calibrate(image_path: str | None) -> None:
+    """Command-line calibration (the GUI has its own friendlier version)."""
     cfg = load_config()
-    # monitor 0 in mss = ALL monitors stitched together, so it works wherever Minecraft is.
-    cfg["monitor"] = 0
-    with mss.mss() as sct:
-        if image_path:
-            frame = cv2.imread(image_path)
-            if frame is None:
-                sys.exit(f"Could not read image: {image_path}")
-        else:
-            print("Go to Minecraft, cast your rod and wait for a bite.")
-            print("The moment you see 'Fishing Bobber splashes' in the subtitles, press F9.")
-            print("(Tip: start calibration with the rod already cast; subtitles fade after ~3 s.)")
-            keyboard.wait("f9")
-            frame = grab(sct, 0)
-            shot = Path(__file__).with_name("calibration_screenshot.png")
-            cv2.imwrite(str(shot), frame)
-            print(f"Captured all monitors ({frame.shape[1]}x{frame.shape[0]}), saved to {shot.name}")
+    if image_path:
+        frame = read_image(Path(image_path))
+        if frame is None:
+            sys.exit(f"Could not read image: {image_path}")
+    else:
+        print("Go to Minecraft, cast your rod and wait for a bite.")
+        print("The moment you see 'Fishing Bobber splashes' in the subtitles, press F9.")
+        print("(Tip: start calibration with the rod already cast; subtitles fade after ~3 s.)")
+        keyboard.wait("f9")
+        frame = desktop_screenshot()
+        write_image(SCREENSHOT_PATH, frame)
+        print(f"Captured all monitors ({frame.shape[1]}x{frame.shape[0]}), saved to {SCREENSHOT_PATH.name}")
 
     print("\nStep 1/2: drag a box around the WHOLE subtitle area (all lines), press ENTER.")
     x, y, w, h = select_roi("Step 1: subtitle area (whole desktop shown)", frame)
     if w == 0 or h == 0:
         sys.exit("No area selected.")
-    region = [x, y, w, h]
     area = frame[y:y + h, x:x + w]
 
     print("Step 2/2: drag a tight box around ONLY the text 'Fishing Bobber splashes', press ENTER.")
-    tx, ty, tw, th = select_roi("Step 2: the splash line", area)
-    if tw == 0 or th == 0:
-        sys.exit("No text selected.")
+    box = select_roi("Step 2: the splash line", area)
+    try:
+        template = extract_template(area, box)
+    except ValueError as e:
+        sys.exit(str(e))
 
-    template = to_gray(area[ty:ty + th, tx:tx + tw])
-    if template.std() < 5:
-        sys.exit("The selected box has no visible text in it. Try again with a tighter box on the text.")
-    cv2.imwrite(str(TEMPLATE_PATH), template)
-
-    cfg["region"] = region
-    CONFIG_PATH.write_text(json.dumps(cfg, indent=2))
+    save_calibration(cfg, [x, y, w, h], template)
     score = match_score(area, template)
     print(f"\nSaved {CONFIG_PATH.name} and {TEMPLATE_PATH.name}. Self-match score: {score:.2f} (should be ~1.0)")
-    print("Now run:  python autofish.py run")
+    print("Now run:  python autofish.py run   (or launch the GUI:  python gui.py)")
 
 
 # --------------------------------------------------------------------------- #
-# Main loop
+# The bot
 # --------------------------------------------------------------------------- #
-def right_click() -> None:
-    pyautogui.mouseDown(button="right")
-    time.sleep(0.05)
-    pyautogui.mouseUp(button="right")
+class FishingBot:
+    """
+    Watches the subtitle region on a background thread and reels in / recasts on a splash.
+
+    Safe to drive from a GUI: start(), stop(), toggle_pause() return immediately, and the
+    live values (state, status, catches, last_score, last_frame) can be read at any time.
+
+    state: idle | starting | watching | testing | reeling | cooldown | paused
+    """
+
+    def __init__(self, cfg: dict, template: np.ndarray, log=print):
+        self.cfg = dict(cfg)
+        self.template = template
+        self._log = log
+        self.catches = 0
+        self.last_score = 0.0
+        self.last_frame = None
+        self.state = "idle"
+        self.status = "Idle"
+        self.dry_run = False
+        self._stop = threading.Event()
+        self._paused = threading.Event()
+        self._thread = None
+        self._last_focus_warning = 0.0
+
+    # -- control ------------------------------------------------------------
+    @property
+    def running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused.is_set()
+
+    def start(self, dry_run: bool = False) -> None:
+        """dry_run=True only watches and reports detections; it never clicks."""
+        if self.running:
+            return
+        self.dry_run = dry_run
+        self.catches = 0
+        self._stop.clear()
+        self._paused.clear()
+        self._thread = threading.Thread(target=self._run, name="FishingBot", daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread:
+            self._thread.join(timeout)
+
+    def toggle_pause(self) -> None:
+        if self._paused.is_set():
+            self._paused.clear()
+            self.log("Resumed")
+        else:
+            self._paused.set()
+            self.log("Paused")
+
+    # -- internals ----------------------------------------------------------
+    def log(self, msg: str) -> None:
+        self._log(f"[{time.strftime('%H:%M:%S')}] {msg}")
+
+    def _set(self, state: str, status: str) -> None:
+        self.state, self.status = state, status
+
+    def _sleep(self, seconds: float) -> bool:
+        """Interruptible sleep. Returns False if stop() was requested meanwhile."""
+        return not self._stop.wait(max(0.0, seconds))
+
+    def _minecraft_focused(self) -> bool:
+        needle = (self.cfg.get("window_title") or "").strip().lower()
+        if not self.cfg.get("require_focus", True) or not needle:
+            return True
+        return needle in foreground_window_title().lower()
+
+    def _warn_unfocused(self) -> None:
+        if time.monotonic() - self._last_focus_warning < 5:
+            return
+        self._last_focus_warning = time.monotonic()
+        needle = self.cfg.get("window_title")
+        self.log(
+            f"Splash seen but not clicking: focused window is '{foreground_window_title()}' "
+            f"(its title must contain '{needle}'). Click into Minecraft, or untick the focus option."
+        )
+
+    def _click(self) -> bool:
+        if not self._minecraft_focused():
+            self._warn_unfocused()
+            return False
+        pyautogui.mouseDown(button="right")
+        time.sleep(0.05)
+        pyautogui.mouseUp(button="right")
+        return True
+
+    def _run(self) -> None:
+        cfg = self.cfg
+        try:
+            with MSS() as sct:
+                # Give the user time to switch to the game.
+                if not self.dry_run and cfg["start_delay"] > 0:
+                    self.log(f"Starting in {cfg['start_delay']:.0f}s - switch to Minecraft and hold the rod")
+                    end = time.monotonic() + cfg["start_delay"]
+                    while time.monotonic() < end:
+                        self._set("starting", f"Starting in {end - time.monotonic() + 0.5:.0f}s - switch to Minecraft")
+                        if not self._sleep(0.2):
+                            return
+                self.log("Test mode: watching only, no clicks" if self.dry_run else "Fishing started")
+
+                while not self._stop.is_set():
+                    if self._paused.is_set():
+                        self._set("paused", "Paused")
+                        self._sleep(0.1)
+                        continue
+                    self._set("testing" if self.dry_run else "watching",
+                              "Testing - watching only, no clicks" if self.dry_run else "Watching for a splash")
+
+                    frame = grab(sct, cfg["monitor"], cfg["region"])
+                    score = match_score(frame, self.template)
+                    self.last_frame, self.last_score = frame, score
+
+                    if score >= cfg["match_threshold"]:
+                        if self.dry_run:
+                            self.catches += 1
+                            self.log(f"Splash detected (score {score:.2f}) - test mode, not clicking")
+                            self._set("cooldown", "Cooldown")
+                            if not self._sleep(cfg["cooldown"]):
+                                break
+                            continue
+
+                        if not self._minecraft_focused():
+                            self._warn_unfocused()
+                            self._sleep(1.0)
+                            continue
+
+                        self._set("reeling", "Splash! Reeling in")
+                        if not self._sleep(cfg["reel_delay"]):
+                            break
+                        if not self._click():          # reel in
+                            continue
+                        self.catches += 1
+                        self.log(f"Splash detected (score {score:.2f}) - catch #{self.catches}")
+                        if not self._sleep(cfg["recast_delay"]):
+                            break
+                        self._click()                  # recast
+                        self._set("cooldown", f"Cooldown ({cfg['cooldown']:.1f}s)")
+                        if not self._sleep(cfg["cooldown"]):   # let the old subtitle fade
+                            break
+                        continue
+
+                    if not self._sleep(cfg["poll_interval"]):
+                        break
+        except pyautogui.FailSafeException:
+            self.log("Stopped: mouse was moved into a screen corner (failsafe)")
+        except Exception as e:  # keep the thread's failure visible instead of dying silently
+            self.log(f"Error: {e!r}")
+        finally:
+            self._set("idle", "Stopped")
+            self.log("Stopped")
 
 
+# --------------------------------------------------------------------------- #
+# Command line
+# --------------------------------------------------------------------------- #
 def run(debug: bool) -> None:
     cfg = load_config()
-    if not cfg["region"] or not TEMPLATE_PATH.exists():
+    template = load_template()
+    if not cfg["region"] or template is None:
         sys.exit("Not calibrated yet. Run:  python autofish.py calibrate")
-    template = cv2.imread(str(TEMPLATE_PATH), cv2.IMREAD_GRAYSCALE)
 
-    paused = False
-    catches = 0
-
-    def toggle():
-        nonlocal paused
-        paused = not paused
-        print("PAUSED" if paused else "RESUMED")
-
-    keyboard.add_hotkey("f7", toggle)
-    print("Auto-fishing started. F7 = pause/resume, F8 = quit.")
-    print("Switch to Minecraft now. Starting in 5 seconds...")
-    time.sleep(5)
-
-    with mss.mss() as sct:
-        while not keyboard.is_pressed("f8"):
-            if paused:
-                time.sleep(0.1)
-                continue
-
-            region = grab(sct, cfg["monitor"], cfg["region"])
-            score = match_score(region, template)
+    bot = FishingBot(cfg, template, log=print)
+    keyboard.add_hotkey("f7", bot.toggle_pause)
+    print("Auto-fishing: F7 = pause/resume, F8 = quit.")
+    bot.start()
+    try:
+        while bot.running and not keyboard.is_pressed("f8"):
             if debug:
-                print(f"score={score:.2f}", end="\r")
-
-            if score >= cfg["match_threshold"]:
-                catches += 1
-                print(f"[{time.strftime('%H:%M:%S')}] Splash detected (score {score:.2f}) - catch #{catches}")
-                time.sleep(cfg["reel_delay"])
-                right_click()                      # reel in
-                time.sleep(cfg["recast_delay"])
-                right_click()                      # recast
-                time.sleep(cfg["cooldown"])        # let the old subtitle fade
-                continue
-
-            time.sleep(cfg["poll_interval"])
-    print("\nStopped.")
+                print(f"score={bot.last_score:.2f}   ", end="\r")
+            time.sleep(0.1)
+    except KeyboardInterrupt:
+        pass
+    bot.stop()
+    bot.join(2)
 
 
 def main() -> None:
