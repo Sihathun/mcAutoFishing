@@ -1,5 +1,9 @@
 # PyInstaller spec -> dist/AutoFishing.exe (single file, no console window)
 # Build with:  pyinstaller --noconfirm AutoFishing.spec
+from pathlib import Path
+
+ICON = str(Path(SPECPATH) / "assets" / "AutoFishing.ico")   # regenerate with: python tools/make_icon.py
+
 a = Analysis(
     ["gui.py"],
     pathex=[],
@@ -28,4 +32,5 @@ exe = EXE(
     runtime_tmpdir=None,
     console=False,    # GUI app: no terminal window
     disable_windowed_traceback=False,
+    icon=ICON,        # the fishing rod, shown in Explorer, the taskbar and Alt+Tab
 )
