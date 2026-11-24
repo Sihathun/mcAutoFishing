@@ -281,7 +281,7 @@ class App(tk.Tk):
         self._restyle()
         self._register_hotkeys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(100, self._tick)
+        self._tick_job = self.after(100, self._tick)
 
     # -- UI construction ------------------------------------------------------
     def _build_ui(self):
@@ -767,7 +767,7 @@ class App(tk.Tk):
             self._last_theme_check = time.monotonic()
             if theme.resolve("system") != self.mode:
                 self._apply_theme()
-        self.after(100, self._tick)
+        self._tick_job = self.after(100, self._tick)
 
     def _refresh(self):
         bot = self.bot
@@ -833,6 +833,10 @@ class App(tk.Tk):
 
     # -- shutdown -------------------------------------------------------------
     def _on_close(self):
+        try:
+            self.after_cancel(self._tick_job)   # otherwise Tk complains about the timer after we're destroyed
+        except (AttributeError, tk.TclError):
+            pass
         if self.bot:
             self.bot.stop()
         self._collect_settings(silent=True)
