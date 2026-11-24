@@ -16,3 +16,8 @@ calibration_screenshot.png
 .idea/
 .DS_Store
 Thumbs.db
+
+# Build output / build environment
+build/
+dist/
+.venv-build/

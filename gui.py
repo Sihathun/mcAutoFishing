@@ -7,6 +7,7 @@ Hotkeys (work even while Minecraft is focused):
     F6 = start    F7 = pause / resume    F8 = stop    F9 = capture screenshot (during calibration)
 """
 import ctypes
+import os
 import queue
 import sys
 import tkinter as tk
@@ -189,7 +190,7 @@ class RoiSelector(tk.Toplevel):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("AutoFishing")
+        self.title(f"AutoFishing v{af.__version__}")
         self.minsize(900, 640)
 
         style = ttk.Style(self)
@@ -565,8 +566,57 @@ class App(tk.Tk):
         self.destroy()
 
 
+def selftest() -> None:
+    """
+    `AutoFishing.exe --selftest`: exercise the parts that can break when packaged (screen capture,
+    template matching, image -> Tk rendering, keyboard hooks) without opening a window or clicking.
+    Raises on failure; main() turns that into exit code 1. Used by the release workflow.
+    """
+    shot = af.desktop_screenshot()
+    assert shot.ndim == 3 and shot.shape[0] > 0 and shot.shape[1] > 0, "screen capture returned nothing"
+
+    rng = np.random.default_rng(0)
+    scene = rng.integers(0, 255, (80, 200, 3), dtype=np.uint8)
+    template = af.to_gray(scene[20:50, 40:120])
+    score = af.match_score(scene, template)
+    assert score > 0.99, f"template match self-score too low: {score}"
+
+    root = tk.Tk()
+    root.withdraw()
+    to_photo(scene, 100, 100)  # needs PIL.ImageTk + the bundled Tk
+    root.destroy()
+
+    keyboard.add_hotkey("f6", lambda: None)
+    keyboard.unhook_all()
+
+
 def main():
-    App().mainloop()
+    # A windowed (no-console) exe has no stdout/stderr; make stray prints harmless.
+    for name in ("stdout", "stderr"):
+        if getattr(sys, name) is None:
+            setattr(sys, name, open(os.devnull, "w"))
+
+    try:
+        if "--selftest" in sys.argv:
+            selftest()
+            return 0
+        App().mainloop()
+    except Exception:
+        # With no console, a crash would otherwise vanish silently.
+        import traceback
+        details = traceback.format_exc()
+        crash_log = af.DATA_DIR / "crash.log"
+        try:
+            crash_log.write_text(details, encoding="utf-8")
+        except OSError:
+            pass
+        if "--selftest" not in sys.argv:  # never block CI on a dialog
+            root = tk.Tk()
+            root.withdraw()
+            messagebox.showerror("AutoFishing crashed", f"{details[-1200:]}\n\nDetails saved to:\n{crash_log}")
+            root.destroy()
+        return 1
+    return 0
 
 
 if __name__ == "__main__":

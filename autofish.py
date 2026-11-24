@@ -22,6 +22,7 @@ Hotkeys (CLI):  F7 = pause/resume   F8 = quit
 import argparse
 import ctypes
 import json
+import os
 import sys
 import threading
 import time
@@ -33,10 +34,28 @@ import mss
 import numpy as np
 import pyautogui
 
-BASE_DIR = Path(__file__).resolve().parent
-CONFIG_PATH = BASE_DIR / "config.json"
-TEMPLATE_PATH = BASE_DIR / "template.png"
-SCREENSHOT_PATH = BASE_DIR / "calibration_screenshot.png"
+__version__ = "1.0.0"
+
+
+def _data_dir() -> Path:
+    """
+    Where config.json / template.png / screenshots live.
+
+    From source: next to this file. Packaged as an .exe: %APPDATA%\\AutoFishing, because a
+    one-file exe unpacks itself into a temp folder that is deleted when the app closes.
+    """
+    if getattr(sys, "frozen", False):
+        root = Path(os.environ.get("APPDATA") or Path.home())
+        folder = root / "AutoFishing"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+    return Path(__file__).resolve().parent
+
+
+DATA_DIR = _data_dir()
+CONFIG_PATH = DATA_DIR / "config.json"
+TEMPLATE_PATH = DATA_DIR / "template.png"
+SCREENSHOT_PATH = DATA_DIR / "calibration_screenshot.png"
 
 DEFAULTS = {
     "region": None,           # [left, top, width, height] of the subtitle area on screen

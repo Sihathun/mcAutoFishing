@@ -1,0 +1,10 @@
+# Used only to build AutoFishing.exe (locally via build_exe.bat, and in CI).
+# opencv-python-headless instead of opencv-python: the GUI app doesn't need cv2's own
+# windows, and it makes the .exe noticeably smaller. Don't install both in the same env.
+opencv-python-headless
+numpy
+mss
+pyautogui
+keyboard
+Pillow
+pyinstaller

@@ -6,13 +6,27 @@ It only looks at your screen and sends mouse clicks. It does not modify the game
 
 > **Heads up:** Some servers ban or restrict automation. Check your server's rules before using this.
 
+## Download (no Python needed)
+
+1. Go to the [**Releases**](../../releases/latest) page and download **AutoFishing.exe**.
+2. Double-click it. The app window opens (the first launch takes a few seconds).
+3. Follow [Using the GUI](#using-the-gui-recommended) below.
+
+**"Windows protected your PC" warning?** The app isn't code-signed, so Windows SmartScreen and some antivirus programs flag new unsigned apps that read the screen and send clicks. Click **More info** then **Run anyway**. If you'd rather not trust a binary, you can [run it from source](#run-from-source) and read every line, or check the download against the `AutoFishing.exe.sha256` file on the release page:
+
+```powershell
+Get-FileHash AutoFishing.exe -Algorithm SHA256
+```
+
+Your calibration and settings are saved in `%APPDATA%\AutoFishing`. Delete that folder to reset the app.
+
 ## Requirements
 
 - Windows 10/11 (the `keyboard` library and screen capture are set up for Windows)
-- Python 3.10 or newer
 - Minecraft Java Edition running **windowed** or **borderless fullscreen** (exclusive fullscreen can't be captured)
+- Python 3.10 or newer, only if you run from source
 
-## Setup
+## Run from source
 
 1. **Get the code**
 
@@ -126,11 +140,41 @@ Press **F7** to pause/resume and **F8** to quit. Use `python autofish.py run --d
 2. OpenCV template matching (`TM_CCOEFF_NORMED` on grayscale) looks for the saved "Fishing Bobber splashes" image. This method ignores brightness, so it still matches when the subtitle text has faded.
 3. On a match, `pyautogui` right-clicks to reel in and right-clicks again to recast, then waits out the cooldown.
 
+## Building the .exe and publishing a release (maintainers)
+
+The exe is built with [PyInstaller](https://pyinstaller.org) from `AutoFishing.spec`.
+
+**Build locally**
+
+```bash
+build_exe.bat
+```
+
+This creates an isolated `.venv-build`, installs `requirements-build.txt`, and writes `dist\AutoFishing.exe`. Check it with `dist\AutoFishing.exe --selftest` (exit code 0 means capture, matching, Tk rendering and keyboard hooks all work inside the bundle).
+
+**Publish a release (automatic)**
+
+1. Bump `__version__` in `autofish.py` (for example `"1.1.0"`) and commit.
+2. Tag and push:
+
+   ```bash
+   git tag v1.1.0
+   git push origin main --tags
+   ```
+
+3. The [Build and release](.github/workflows/release.yml) workflow builds the exe on a Windows runner, runs the self-test, and creates a GitHub Release with `AutoFishing.exe` and a SHA-256 checksum attached. The workflow fails if the tag doesn't match `__version__`.
+
+You can also run the workflow by hand from the **Actions** tab to get the exe as a build artifact without making a release.
+
+When run as an exe, the app stores its data in `%APPDATA%\AutoFishing` instead of next to the script, because a one-file exe unpacks to a temporary folder that is deleted on exit.
+
 ## Files
 
 - `gui.py`: the graphical app (calibration wizard, live view, settings, start/stop)
-- `start_gui.bat`: double-click launcher for the GUI
+- `start_gui.bat`: double-click launcher for the GUI when running from source
 - `autofish.py`: core logic (screen capture, matching, the fishing bot) plus the command-line interface
-- `requirements.txt`: Python dependencies
+- `requirements.txt`: Python dependencies for running from source
+- `requirements-build.txt`, `AutoFishing.spec`, `build_exe.bat`: build the standalone `.exe`
+- `.github/workflows/release.yml`: builds and publishes the exe when a `v*` tag is pushed
 - `config.json`, `template.png`, `calibration_screenshot.png`: generated per machine and git-ignored
 # mcAutoFishing
