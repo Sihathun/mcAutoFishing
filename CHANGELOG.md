@@ -9,6 +9,8 @@ Group bullets under **Added**, **Changed**, **Fixed** or **Removed**.
 
 ## [Unreleased]
 
+## [1.1.0-beta.1] - 2026-11-24
+
 ### Added
 - **Automatic setup: no more calibrating.** Turn on subtitles, press Start, and cast. The app finds your Minecraft window and learns your in-game GUI size from the first "Fishing Bobber splashes" bite, then reels that fish in and remembers the size for next time.
 - **Game window picker.** A dropdown lists every open window. Minecraft is detected automatically, but if the app picks the wrong program you can choose the right one yourself (↻ refreshes the list). Your choice is remembered.

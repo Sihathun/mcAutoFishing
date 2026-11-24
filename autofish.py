@@ -42,7 +42,7 @@ try:
 except ImportError:  # very old mss
     ScreenShotError = Exception
 
-__version__ = "1.0.0"
+__version__ = "1.1.0-beta.1"
 
 
 def _data_dir() -> Path:
