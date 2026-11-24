@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT))
 import appicon  # noqa: E402
 import autofish as af  # noqa: E402
 import theme  # noqa: E402
+import winutil  # noqa: E402
 
 
 def luminance(color: str) -> float:
@@ -98,8 +99,8 @@ class IconTests(unittest.TestCase):
         self.assertEqual(alpha.getpixel((0, 0)), 0)
 
     def test_ico_file_has_every_size_windows_asks_for(self):
-        ico = Image.open(ROOT / "assets" / "AutoFishing.ico")
-        sizes = {s[0] for s in ico.info["sizes"]}
+        with Image.open(ROOT / "assets" / "AutoFishing.ico") as ico:
+            sizes = {s[0] for s in ico.info["sizes"]}
         self.assertTrue({16, 24, 32, 48, 64, 128, 256} <= sizes, sizes)
 
     def test_logo_source_is_kept(self):
@@ -111,17 +112,45 @@ class IconTests(unittest.TestCase):
         self.assertTrue((ROOT / "assets" / "AutoFishing.ico").exists())
 
 
+FAKE_GAME = winutil.WindowInfo(hwnd=1, title="Fake Minecraft", cls="SDL_app", pid=1, exe="javaw.exe",
+                               width=1280, height=720)
+
+
 class GuiSmokeTests(unittest.TestCase):
-    """Builds the real window (hidden behind nothing, no bot started) and flips between themes."""
+    """
+    Builds the real window (no bot started) and flips between themes.
 
-    def test_window_themes_and_settings_dialog(self):
+    The set of open windows is faked, so the results never depend on whether Minecraft happens to be running
+    on the machine (it is on a developer's PC, it is not on the CI runner).
+    """
+
+    def build_app(self, tmp, windows, theme_choice="dark"):
         import gui   # imported here: it requests DPI awareness and an app id at import time
+        (Path(tmp) / "config.json").write_text(json.dumps({"theme": theme_choice}))
+        with mock.patch.object(winutil, "list_windows", lambda include_self=False: list(windows)):
+            return gui, gui.App()
 
+    def test_banner_says_so_when_there_is_no_game_window(self):
         with tempfile.TemporaryDirectory() as tmp, \
                 mock.patch.object(af, "CONFIG_PATH", Path(tmp) / "config.json"), \
-                mock.patch.object(af, "TEMPLATE_PATH", Path(tmp) / "missing.png"):
-            (Path(tmp) / "config.json").write_text(json.dumps({"theme": "dark"}))
-            app = gui.App()
+                mock.patch.object(af, "TEMPLATE_PATH", Path(tmp) / "missing.png"), \
+                mock.patch.object(winutil, "list_windows", lambda include_self=False: []):
+            for choice in ("light", "dark"):
+                with self.subTest(theme=choice):
+                    _, app = self.build_app(tmp, [], choice)
+                    try:
+                        app.update()
+                        self.assertIn("No Minecraft window found", app.banner.cget("text"))
+                        self.assertEqual(app.header.cget("bg"), theme.STATE_COLORS[choice]["warn"][0])
+                    finally:
+                        app._on_close()
+
+    def test_window_themes_and_settings_dialog(self):
+        with tempfile.TemporaryDirectory() as tmp, \
+                mock.patch.object(af, "CONFIG_PATH", Path(tmp) / "config.json"), \
+                mock.patch.object(af, "TEMPLATE_PATH", Path(tmp) / "missing.png"), \
+                mock.patch.object(winutil, "list_windows", lambda include_self=False: [FAKE_GAME]):
+            gui, app = self.build_app(tmp, [FAKE_GAME])
             try:
                 app.update()
                 self.assertEqual(app.mode, "dark")
