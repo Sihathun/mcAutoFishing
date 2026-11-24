@@ -49,11 +49,17 @@ jobs:
             throw "CHANGELOG.md has no entry for [$version]. Add a '## [$version] - YYYY-MM-DD' section and re-tag."
           }
           $intro = "Download **AutoFishing.exe** below and double-click it. No Python needed. Windows may show a SmartScreen warning because the app is not code-signed: click *More info* then *Run anyway*."
+          if ($version -match "-") {
+            $intro = "> **Pre-release:** this is a testing build. It may have bugs, and the latest stable release is still the recommended download. Feedback is welcome.`n`n" + $intro
+          }
           Set-Content release-notes.md ($intro + "`n`n" + $m.Groups[1].Value.Trim() + "`n") -Encoding utf8
           Get-Content release-notes.md
 
       - name: Install build dependencies
         run: python -m pip install -r requirements-build.txt
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
 
       - name: Build AutoFishing.exe
         run: pyinstaller --noconfirm --clean AutoFishing.spec
@@ -98,6 +104,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
+          # A tag with a hyphen (v1.1.0-beta.1) is a pre-release: it never becomes the "Latest" release.
+          $flags = @()
+          if ($env:TAG -match "-") { $flags += "--prerelease" }
           gh release create $env:TAG dist\AutoFishing.exe dist\AutoFishing.exe.sha256 `
             --title "AutoFishing $env:TAG" `
-            --notes-file release-notes.md
+            --notes-file release-notes.md @flags
