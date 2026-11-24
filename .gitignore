@@ -21,3 +21,6 @@ Thumbs.db
 build/
 dist/
 .venv-build/
+
+# Local Claude Code context (not for the repo)
+CLAUDE.md

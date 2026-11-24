@@ -154,15 +154,16 @@ This creates an isolated `.venv-build`, installs `requirements-build.txt`, and w
 
 **Publish a release (automatic)**
 
-1. Bump `__version__` in `autofish.py` (for example `"1.1.0"`) and commit.
-2. Tag and push:
+1. In [CHANGELOG.md](CHANGELOG.md), rename `## [Unreleased]` to `## [1.1.0] - YYYY-MM-DD` (and add a fresh empty `## [Unreleased]` above it). This section becomes the release notes, so write it for users.
+2. Set `__version__ = "1.1.0"` in `autofish.py` and commit both files.
+3. Tag and push:
 
    ```bash
    git tag v1.1.0
    git push origin main --tags
    ```
 
-3. The [Build and release](.github/workflows/release.yml) workflow builds the exe on a Windows runner, runs the self-test, and creates a GitHub Release with `AutoFishing.exe` and a SHA-256 checksum attached. The workflow fails if the tag doesn't match `__version__`.
+4. The [Build and release](.github/workflows/release.yml) workflow builds the exe on a Windows runner, runs the self-test, and creates a GitHub Release with `AutoFishing.exe` and a SHA-256 checksum attached. The release notes are the matching `CHANGELOG.md` section. The workflow fails early if the tag doesn't match `__version__` or the changelog has no entry for that version.
 
 You can also run the workflow by hand from the **Actions** tab to get the exe as a build artifact without making a release.
 
@@ -176,5 +177,6 @@ When run as an exe, the app stores its data in `%APPDATA%\AutoFishing` instead o
 - `requirements.txt`: Python dependencies for running from source
 - `requirements-build.txt`, `AutoFishing.spec`, `build_exe.bat`: build the standalone `.exe`
 - `.github/workflows/release.yml`: builds and publishes the exe when a `v*` tag is pushed
+- `CHANGELOG.md`: what changed in each version; also used as the GitHub Release notes
 - `config.json`, `template.png`, `calibration_screenshot.png`: generated per machine and git-ignored
 # mcAutoFishing
