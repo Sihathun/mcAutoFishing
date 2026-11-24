@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo_source.png" width="120" alt="AutoFishing logo"></p>
+
 # AutoFishing
 
 A Python auto-fisher for Minecraft (Java Edition). It reads Minecraft's on-screen **subtitles**, and when it sees **"Fishing Bobber splashes"** it right-clicks to reel in and right-clicks again to recast.
@@ -80,6 +82,8 @@ Automatic setup understands the **English** text in the **default Minecraft font
 | Mouse into a screen corner | Emergency abort (PyAutoGUI failsafe) |
 
 The hotkeys work even while Minecraft has focus. All settings are editable in the app (hover a setting for an explanation) and are saved automatically.
+
+**Dark mode:** click the **⚙** gear in the top-right corner and pick **Appearance**: *Match Windows* (default), *Light* or *Dark*.
 
 **Safety net:** by default the bot only clicks while the game window it is watching is the focused window. If you alt-tab away, it pauses clicking instead of right-clicking in another program. You can turn this off in the Settings box.
 
@@ -182,6 +186,8 @@ The workflow also runs the unit tests (`python -m unittest discover -s tests`) b
 
 You can also run the workflow by hand from the **Actions** tab to get the exe as a build artifact without making a release.
 
+**Changing the logo/icon:** replace `assets/logo_source.png`, run `python tools/make_icon.py` (it keeps only the largest shape, the rod, and drops the lettering, which is unreadable at small sizes), then rebuild.
+
 When run as an exe, the app stores its data in `%APPDATA%\AutoFishing` instead of next to the script, because a one-file exe unpacks to a temporary folder that is deleted on exit.
 
 ## Files
@@ -191,6 +197,9 @@ When run as an exe, the app stores its data in `%APPDATA%\AutoFishing` instead o
 - `autofish.py`: core logic (screen capture, the fishing bot, manual calibration) plus the command-line interface
 - `autodetect.py`: automatic setup: the built-in splash reference and GUI-scale detection
 - `winutil.py`: Windows helpers: list open windows, find Minecraft, read a window's client area
+- `theme.py`: light and dark appearance (palettes, system theme detection, dark title bar)
+- `assets/`: the logo (`logo_source.png`) and the `.exe` icon (`AutoFishing.ico`); `appicon.py` is the same icon embedded for the window/taskbar icon
+- `tools/make_icon.py`: regenerates `AutoFishing.ico` and `appicon.py` from `assets/logo_source.png`
 - `tests/`: unit tests (`python -m unittest discover -s tests`), no game needed
 - `tools/make_reference.py`: developer tool that regenerates the built-in reference from a manual calibration
 - `requirements.txt`: Python dependencies for running from source
