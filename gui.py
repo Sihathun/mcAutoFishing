@@ -10,6 +10,7 @@ import ctypes
 import os
 import queue
 import sys
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
@@ -25,7 +26,11 @@ import keyboard
 import numpy as np
 from PIL import Image, ImageTk
 
+import autodetect
 import autofish as af
+import winutil
+
+AUTO_ENTRY = "Auto-detect Minecraft (recommended)"
 
 # (config key, label, min, max, step, number format, tooltip)
 SETTINGS = [
@@ -49,6 +54,8 @@ SETTINGS = [
 STATE_COLORS = {
     "idle": ("#e5e7eb", "#111827"),
     "starting": ("#fde68a", "#78350f"),
+    "waiting": ("#fde68a", "#78350f"),
+    "learning": ("#0e7490", "#ffffff"),
     "watching": ("#16a34a", "#ffffff"),
     "reeling": ("#16a34a", "#ffffff"),
     "cooldown": ("#16a34a", "#ffffff"),
@@ -191,7 +198,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"AutoFishing v{af.__version__}")
-        self.minsize(900, 640)
+        self.minsize(940, 720)
 
         style = ttk.Style(self)
         style.theme_use("vista" if "vista" in style.theme_names() else "clam")
@@ -199,6 +206,7 @@ class App(tk.Tk):
 
         self.cfg = af.load_config()
         self.template = af.load_template()
+        self.detector = autodetect.SubtitleDetector()
         self.bot = None
         self.log_q = queue.Queue()
         self.event_q = queue.Queue()
@@ -206,9 +214,14 @@ class App(tk.Tk):
         self._preview_photo = None
         self._template_photo = None
         self._last_frame_id = None
+        self._windows: list = []          # WindowInfo list behind the dropdown (index i -> entry i + 1)
+        self._pinned_hwnd = None          # the exact window the user picked (None = auto-detect)
+        self._last_window_check = 0.0
+        self._target_win = None           # the game window as of the last (throttled) check
 
         self._build_ui()
-        self._refresh_calibration_info()
+        self._refresh_windows()
+        self._on_mode_change()
         self._register_hotkeys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._tick)
@@ -234,22 +247,62 @@ class App(tk.Tk):
         right.rowconfigure(2, weight=1)
 
         # --- 1. Setup
-        setup = ttk.LabelFrame(left, text="1. Setup")
+        setup = ttk.LabelFrame(left, text="1. Game window")
         setup.pack(fill="x", **{"pady": (0, 8)})
         ttk.Label(
-            setup, justify="left", wraplength=290,
-            text=("Turn on subtitles in Minecraft:\nOptions > Accessibility Settings > Show Subtitles.\n\n"
-                  "Then click Calibrate, switch to Minecraft, cast your rod, and press F9 the moment "
+            setup, justify="left", wraplength=300,
+            text=("Turn on subtitles in Minecraft (Options > Accessibility Settings > Show Subtitles), "
+                  "then press Start and cast your rod. The game window and your GUI size are found "
+                  "automatically."),
+        ).pack(anchor="w", **pad)
+
+        pick = ttk.Frame(setup)
+        pick.pack(fill="x", padx=10)
+        pick.columnconfigure(0, weight=1)
+        self.win_combo = ttk.Combobox(pick, state="readonly", width=42, postcommand=self._refresh_windows)
+        self.win_combo.grid(row=0, column=0, sticky="ew")
+        self.win_combo.bind("<<ComboboxSelected>>", self._on_window_selected)
+        self.win_refresh_btn = ttk.Button(pick, text="↻", width=3, command=self._refresh_windows)
+        self.win_refresh_btn.grid(row=0, column=1, padx=(6, 0))
+        Tooltip(self.win_combo, "Every open window. If auto-detection picks the wrong one,\nchoose the game's window here.")
+        Tooltip(self.win_refresh_btn, "Refresh the list of open windows")
+
+        self.win_status = ttk.Label(setup, text="", justify="left", wraplength=300)
+        self.win_status.pack(anchor="w", padx=10, pady=(6, 0))
+        self.scale_status = ttk.Label(setup, text="", justify="left", wraplength=300)
+        self.scale_status.pack(anchor="w", padx=10, pady=(2, 4))
+
+        self.mode_var = tk.StringVar(value=self.cfg["mode"])
+        modes = ttk.Frame(setup)
+        modes.pack(fill="x", padx=10, pady=(2, 6))
+        ttk.Radiobutton(modes, text="Automatic", value="auto", variable=self.mode_var,
+                        command=self._on_mode_change).pack(side="left")
+        manual_radio = ttk.Radiobutton(modes, text="Manual calibration", value="manual", variable=self.mode_var,
+                                       command=self._on_mode_change)
+        manual_radio.pack(side="left", padx=(12, 0))
+        Tooltip(manual_radio, "Advanced: draw the subtitle area yourself. Use this if automatic detection\n"
+                              "doesn't work (other language, or a resource pack that changes the font).")
+
+        # Manual calibration (advanced): only shown when "Manual calibration" is selected.
+        self.manual_frame = ttk.LabelFrame(setup, text="Manual calibration (advanced)")
+        ttk.Label(
+            self.manual_frame, justify="left", wraplength=290,
+            text=("Click Calibrate, switch to Minecraft, cast your rod, and press F9 the moment "
                   "'Fishing Bobber splashes' shows up."),
         ).pack(anchor="w", **pad)
-        self.cal_info = ttk.Label(setup, text="", justify="left", wraplength=290)
+        self.cal_info = ttk.Label(self.manual_frame, text="", justify="left", wraplength=290)
         self.cal_info.pack(anchor="w", padx=10)
-        btns = ttk.Frame(setup)
+        btns = ttk.Frame(self.manual_frame)
         btns.pack(fill="x", **pad)
         self.cal_btn = ttk.Button(btns, text="Calibrate (F9)", command=self._calibrate_live, style="Big.TButton")
         self.cal_btn.pack(side="left")
         self.cal_img_btn = ttk.Button(btns, text="From screenshot...", command=self._calibrate_from_file)
         self.cal_img_btn.pack(side="left", padx=(8, 0))
+        ttk.Label(self.manual_frame, text="Game window title must contain:").pack(anchor="w", padx=10)
+        self.title_var = tk.StringVar(value=self.cfg["window_title"])
+        title_entry = ttk.Entry(self.manual_frame, textvariable=self.title_var)
+        title_entry.pack(fill="x", padx=10, pady=(2, 8))
+        Tooltip(title_entry, "Manual mode only: clicks are allowed only while the focused window's\ntitle contains this text.")
 
         # --- 2. Fishing controls
         ctl = ttk.LabelFrame(left, text="2. Fish")
@@ -283,15 +336,11 @@ class App(tk.Tk):
             Tooltip(spin, tip)
         r = len(SETTINGS)
         self.focus_var = tk.BooleanVar(value=bool(self.cfg["require_focus"]))
-        chk = ttk.Checkbutton(sett, text="Only click while the focused window's title contains:", variable=self.focus_var)
+        chk = ttk.Checkbutton(sett, text="Only click while the game window is focused", variable=self.focus_var)
         chk.grid(row=r, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 0))
         Tooltip(chk, "Safety net: if you alt-tab away, the bot stops clicking\ninstead of right-clicking in some other program.")
-        self.title_var = tk.StringVar(value=self.cfg["window_title"])
-        title_entry = ttk.Entry(sett, textvariable=self.title_var)
-        title_entry.grid(row=r + 1, column=0, columnspan=2, sticky="ew", padx=10, pady=(2, 4))
-        Tooltip(title_entry, "The focused window's title must contain this text.")
         ttk.Button(sett, text="Reset to defaults", command=self._reset_settings).grid(
-            row=r + 2, column=0, columnspan=2, sticky="w", padx=10, pady=(2, 8))
+            row=r + 1, column=0, columnspan=2, sticky="w", padx=10, pady=(6, 8))
 
         # --- Live view
         live = ttk.LabelFrame(right, text="Live view")
@@ -358,6 +407,7 @@ class App(tk.Tk):
                 return False
             new[key] = min(max(value, lo), hi)
         self.cfg.update(new)
+        self.cfg["mode"] = self.mode_var.get()
         self.cfg["require_focus"] = bool(self.focus_var.get())
         self.cfg["window_title"] = self.title_var.get().strip()
         for key, _l, _lo, _hi, _s, fmt, _t in SETTINGS:  # show the clamped values back to the user
@@ -370,20 +420,119 @@ class App(tk.Tk):
         self.focus_var.set(af.DEFAULTS["require_focus"])
         self.title_var.set(af.DEFAULTS["window_title"])
 
-    # -- calibration ----------------------------------------------------------
+    # -- game window selection --------------------------------------------------
+    def _refresh_windows(self):
+        """Fill the dropdown with every open window (Auto first) and keep the current choice selected."""
+        try:
+            self._windows = winutil.list_windows()
+        except Exception as e:   # never let a Win32 hiccup break the dropdown
+            self._windows = []
+            self._log(f"Couldn't list windows: {e}")
+        self.win_combo["values"] = [AUTO_ENTRY] + [w.label() for w in self._windows]
+
+        index = 0
+        if self._pinned_hwnd:
+            index = next((i for i, w in enumerate(self._windows, 1) if w.hwnd == self._pinned_hwnd), 0)
+            if not index:
+                self._pinned_hwnd = None       # that window is gone
+        elif self.cfg.get("target_window"):     # remembered from last time
+            match = winutil.match_hints(self._windows, self.cfg["target_window"])
+            if match:
+                self._pinned_hwnd = match.hwnd
+                index = self._windows.index(match) + 1
+        self.win_combo.current(index)
+        self._update_window_status(force=True)
+
+    def _on_window_selected(self, _event=None):
+        index = self.win_combo.current()
+        if index <= 0:
+            self._pinned_hwnd = None
+            self.cfg["target_window"] = None
+            self._log("Game window: auto-detect")
+        else:
+            win = self._windows[index - 1]
+            self._pinned_hwnd = win.hwnd
+            self.cfg["target_window"] = win.hints()
+            self._log(f"Game window chosen: {win.title} ({win.exe})")
+        try:
+            af.save_config(self.cfg)
+        except OSError:
+            pass
+        self.win_combo.selection_clear()
+        self._update_window_status(force=True)
+
+    def _resolve_window(self):
+        """What the bot calls to find the game window (runs on the bot's thread)."""
+        return winutil.resolve_target(self.cfg.get("target_window"), self._pinned_hwnd)
+
+    def _update_window_status(self, force: bool = False):
+        """Show which window is in use, and the GUI scale state. Throttled: it enumerates windows."""
+        now = time.monotonic()
+        if not force and now - self._last_window_check < 1.5:
+            return
+        self._last_window_check = now
+        bot = self.bot
+        running = bool(bot and bot.running)
+
+        if self.mode_var.get() == "manual":
+            self._target_win = None
+            self.win_status.config(text="Manual mode: watching the area you calibrated.", foreground="")
+            self.scale_status.config(text="")
+            return
+
+        win = bot.window if running and bot.window else self._resolve_window()
+        self._target_win = win
+        if win is None:
+            self.win_status.config(
+                text="✗ No Minecraft window found. Start the game, or pick its window from the list.",
+                foreground="#b91c1c")
+        else:
+            how = "chosen by you" if self._pinned_hwnd else "auto-detected"
+            self.win_status.config(
+                text=f"✓ {win.title}\n   {win.width}x{win.height}, {win.exe} ({how})", foreground="#15803d")
+
+        if running and bot.scale:
+            self.scale_status.config(text=f"GUI scale: {bot.scale}x")
+        elif running:
+            self.scale_status.config(text="GUI scale: learning... (needs one bite)")
+        elif self.cfg.get("gui_scale"):
+            self.scale_status.config(text=f"GUI scale: {self.cfg['gui_scale']}x (remembered)")
+        else:
+            self.scale_status.config(text="GUI scale: learned automatically on the first bite")
+
+    # -- mode / calibration ---------------------------------------------------
     @property
-    def calibrated(self) -> bool:
+    def manual_ready(self) -> bool:
         return bool(self.cfg.get("region")) and self.template is not None
 
-    def _refresh_calibration_info(self):
-        if self.calibrated:
-            _x, _y, w, h = self.cfg["region"]
-            self.cal_info.config(text=f"Calibrated: watching a {w} x {h} px area.")
-            self._template_photo = to_photo(self.template, 420, 60, max_scale=3.0)
-            self.template_label.config(image=self._template_photo, text="")
+    def _on_mode_change(self):
+        manual = self.mode_var.get() == "manual"
+        if manual:
+            self.manual_frame.pack(fill="x", padx=10, pady=(0, 8))
         else:
-            self.cal_info.config(text="Not calibrated yet.")
-            self.template_label.config(image="", text="(not calibrated)")
+            self.manual_frame.pack_forget()
+        self.win_combo.config(state="disabled" if manual else "readonly")
+        self.win_refresh_btn.config(state="disabled" if manual else "normal")
+        self._refresh_looking_for()
+        self._update_window_status(force=True)
+
+    def _refresh_looking_for(self):
+        """The 'Looking for' picture: the built-in reference (auto) or your calibrated template (manual)."""
+        if self.mode_var.get() == "manual":
+            if self.manual_ready:
+                _x, _y, w, h = self.cfg["region"]
+                self.cal_info.config(text=f"Calibrated: watching a {w} x {h} px area.")
+                self._template_photo = to_photo(self.template, 420, 60, max_scale=3.0)
+                self.template_label.config(image=self._template_photo, text="")
+            else:
+                self.cal_info.config(text="Not calibrated yet.")
+                self.template_label.config(image="", text="(not calibrated)")
+        else:
+            self.cal_info.config(text="Calibrated: watching a "
+                                      f"{self.cfg['region'][2]} x {self.cfg['region'][3]} px area."
+                                 if self.manual_ready else "Not calibrated yet.")
+            self._template_photo = to_photo(self.detector.ref, 420, 60, max_scale=4.0)
+            self.template_label.config(image=self._template_photo, text="")
 
     def _calibrate_live(self):
         if self._waiting_capture:  # button doubles as "cancel"
@@ -443,9 +592,10 @@ class App(tk.Tk):
             messagebox.showerror("Calibration failed", str(e))
             return
 
-        af.save_calibration(self.cfg, [x, y, w, h], template)
+        af.save_calibration(self.cfg, [x, y, w, h], template)   # also switches the config to manual mode
         self.template = template
-        self._refresh_calibration_info()
+        self.mode_var.set("manual")
+        self._on_mode_change()
         score = af.match_score(area, template)
         self._log(f"Calibrated. Self-match score {score:.2f} (should be about 1.00).")
         messagebox.showinfo("Calibrated", "Calibration saved.\n\nTip: press 'Test detection' and "
@@ -455,8 +605,10 @@ class App(tk.Tk):
     def _begin(self, dry_run: bool):
         if self.bot and self.bot.running:
             return
-        if not self.calibrated:
-            messagebox.showwarning("Not calibrated", "Calibrate first: click 'Calibrate' and follow the steps.")
+        manual = self.mode_var.get() == "manual"
+        if manual and not self.manual_ready:
+            messagebox.showwarning("Not calibrated", "Manual mode needs a calibration: click 'Calibrate' and "
+                                                     "follow the steps, or switch back to Automatic.")
             return
         if self._waiting_capture:
             self._waiting_capture = False
@@ -467,7 +619,8 @@ class App(tk.Tk):
         if dry_run:
             cfg["start_delay"] = 0
         self._last_frame_id = None
-        self.bot = af.FishingBot(cfg, self.template, log=self._log)
+        self.bot = af.FishingBot(cfg, self.template if manual else None, log=self._log,
+                                 window_resolver=self._resolve_window)
         self.bot.start(dry_run=dry_run)
 
     def _start(self):
@@ -516,10 +669,12 @@ class App(tk.Tk):
             text, key = "Waiting for F9 - go to Minecraft and press it when the splash subtitle shows", "wait"
         elif running:
             text, key = bot.status, bot.state
-        elif not self.calibrated:
-            text, key = "Not calibrated - click Calibrate to get started", "warn"
+        elif self.mode_var.get() == "manual" and not self.manual_ready:
+            text, key = "Manual mode: not calibrated - click Calibrate, or switch to Automatic", "warn"
+        elif self.mode_var.get() == "auto" and self._target_win is None:
+            text, key = "No Minecraft window found - start the game, or pick it from the list", "warn"
         else:
-            text, key = "Ready - press Start (F6)", "idle"
+            text, key = "Ready - cast your rod, then press Start (F6)", "idle"
         bg, fg = STATE_COLORS[key]
         self.banner.config(text=text, bg=bg, fg=fg)
 
@@ -528,12 +683,26 @@ class App(tk.Tk):
         self.start_btn.config(state="normal" if idle else "disabled")
         self.test_btn.config(state="normal" if idle else "disabled")
         self.cal_img_btn.config(state="normal" if idle else "disabled")
+        self.win_combo.config(state="readonly" if idle and self.mode_var.get() == "auto" else "disabled")
+        self.win_refresh_btn.config(state="normal" if idle and self.mode_var.get() == "auto" else "disabled")
         self.cal_btn.config(state="normal" if idle else "disabled",
                             text="Cancel capture" if self._waiting_capture else "Calibrate (F9)")
         self.stop_btn.config(state="normal" if running else "disabled")
         can_pause = running and not bot.dry_run
         self.pause_btn.config(state="normal" if can_pause else "disabled",
                               text="Resume (F7)" if (running and bot.paused) else "Pause (F7)")
+
+        self._update_window_status()
+
+        # Remember a GUI scale the bot just learned, so the next start doesn't need a bite to find it.
+        if bot is not None and bot.auto and bot.cfg.get("gui_scale") \
+                and bot.cfg["gui_scale"] != self.cfg.get("gui_scale"):
+            self.cfg["gui_scale"], self.cfg["gui_scale_client"] = bot.cfg["gui_scale"], bot.cfg["gui_scale_client"]
+            try:
+                af.save_config(self.cfg)
+            except OSError:
+                pass
+            self._update_window_status(force=True)
 
         # Live view
         if bot is not None:
@@ -545,7 +714,7 @@ class App(tk.Tk):
                 self._preview_photo = to_photo(frame, 520, 220, max_scale=1.0)
                 self.preview_label.config(image=self._preview_photo, text="")
             score = max(0.0, bot.last_score)
-            thr = bot.cfg["match_threshold"]
+            thr = bot.threshold
             self.score_bar.config(value=score * 100)
             hit = "  MATCH" if score >= thr else ""
             self.score_label.config(text=f"{score:.2f} / need {thr:.2f}{hit}")
@@ -585,6 +754,15 @@ def selftest() -> None:
     root.withdraw()
     to_photo(scene, 100, 100)  # needs PIL.ImageTk + the bundled Tk
     root.destroy()
+
+    # Auto-setup: the built-in reference must be found, at the right GUI scale, in a synthetic subtitle.
+    detector = autodetect.SubtitleDetector()
+    canvas = np.full((120, 700, 3), 40, dtype=np.uint8)
+    line = cv2.cvtColor(detector.reference_at(4), cv2.COLOR_GRAY2BGR)
+    canvas[20:20 + line.shape[0], 40:40 + line.shape[1]] = line
+    found_scale, found_score, _ = detector.best_scale(canvas, (0, 0), range(1, 7))
+    assert found_scale == 4 and found_score > 0.9, f"auto-detect failed: scale {found_scale}, score {found_score}"
+    assert isinstance(winutil.list_windows(), list), "window listing failed"
 
     keyboard.add_hotkey("f6", lambda: None)
     keyboard.unhook_all()

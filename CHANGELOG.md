@@ -9,6 +9,18 @@ Group bullets under **Added**, **Changed**, **Fixed** or **Removed**.
 
 ## [Unreleased]
 
+### Added
+- **Automatic setup: no more calibrating.** Turn on subtitles, press Start, and cast. The app finds your Minecraft window and learns your in-game GUI size from the first "Fishing Bobber splashes" bite, then reels that fish in and remembers the size for next time.
+- **Game window picker.** A dropdown lists every open window. Minecraft is detected automatically, but if the app picks the wrong program you can choose the right one yourself (↻ refreshes the list). Your choice is remembered.
+- **Setup status at a glance:** the app shows which window it is using, and whether your GUI size is known or still being learned.
+- It re-learns the GUI size automatically if you resize the game window or change the GUI scale in Minecraft's video settings.
+- Clear status messages when there is no Minecraft window, or when it is minimized or can't be captured.
+
+### Changed
+- The "only click while Minecraft is focused" safety net now follows the game window itself instead of matching its title. Modpacks that rename the window (for example "COBBLEVERSE") no longer risk blocking clicks.
+- Manual calibration is now an advanced option (choose **Manual calibration**), for non-English games or font resource packs. Existing manual calibrations keep working.
+- The command-line `run` also uses automatic setup, so it no longer needs calibrating first.
+
 ## [1.0.0] - 2026-11-24
 
 First public release.
