@@ -6,18 +6,25 @@ AutoFishing GUI - a point-and-click front end for autofish.py.
 Hotkeys (work even while Minecraft is focused):
     F6 = start    F7 = pause / resume    F8 = stop    F9 = capture screenshot (during calibration)
 """
+import base64
 import ctypes
+import io
 import os
 import queue
 import sys
 import time
 import tkinter as tk
 from pathlib import Path
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, ttk
 
 # Must happen before the first window exists so Tk isn't blurry / mis-scaled on high-DPI screens.
 try:
     ctypes.windll.shcore.SetProcessDpiAwareness(1)
+except Exception:
+    pass
+# Our own app identity, so the taskbar shows the AutoFishing icon instead of grouping us under python.exe.
+try:
+    ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("Sihathun.AutoFishing")
 except Exception:
     pass
 
@@ -26,8 +33,10 @@ import keyboard
 import numpy as np
 from PIL import Image, ImageTk
 
+import appicon
 import autodetect
 import autofish as af
+import theme
 import winutil
 
 AUTO_ENTRY = "Auto-detect Minecraft (recommended)"
@@ -50,25 +59,19 @@ SETTINGS = [
      "Time to switch to the Minecraft window after pressing Start."),
 ]
 
-# bot.state -> (banner background, banner text colour)
-STATE_COLORS = {
-    "idle": ("#e5e7eb", "#111827"),
-    "starting": ("#fde68a", "#78350f"),
-    "waiting": ("#fde68a", "#78350f"),
-    "learning": ("#0e7490", "#ffffff"),
-    "watching": ("#16a34a", "#ffffff"),
-    "reeling": ("#16a34a", "#ffffff"),
-    "cooldown": ("#16a34a", "#ffffff"),
-    "testing": ("#2563eb", "#ffffff"),
-    "paused": ("#f59e0b", "#111827"),
-    "warn": ("#fecaca", "#7f1d1d"),
-    "wait": ("#bfdbfe", "#1e3a8a"),
-}
+ICON_SIZES = (16, 32, 48, 64, 128)
 
 
 # --------------------------------------------------------------------------- #
 # Small helpers
 # --------------------------------------------------------------------------- #
+def load_icon_images(sizes=ICON_SIZES) -> list:
+    """The embedded app icon (the fishing rod) at several sizes, as PIL images."""
+    data = base64.b64decode(appicon.ICON_PNG_B64)
+    base = Image.open(io.BytesIO(data)).convert("RGBA")
+    return [base.resize((s, s), Image.Resampling.LANCZOS) for s in sizes]
+
+
 def to_photo(img: np.ndarray, max_w: int, max_h: int, max_scale: float = 1.0) -> ImageTk.PhotoImage:
     """Fit a BGR or gray image inside max_w x max_h (enlarging at most max_scale times)."""
     if img.ndim == 2:
@@ -98,8 +101,10 @@ class Tooltip:
         self.tip = tk.Toplevel(self.widget)
         self.tip.wm_overrideredirect(True)
         self.tip.wm_geometry(f"+{x}+{y}")
-        tk.Label(self.tip, text=self.text, justify="left", background="#ffffe0", relief="solid",
-                 borderwidth=1, padx=6, pady=4).pack()
+        p = theme.current
+        self.tip.configure(bg=p["border"])
+        tk.Label(self.tip, text=self.text, justify="left", background=p["tip_bg"], foreground=p["tip_fg"],
+                 relief="flat", borderwidth=0, padx=6, pady=4).pack(padx=1, pady=1)
 
     def _hide(self, _event=None):
         if self.tip:
@@ -113,6 +118,7 @@ class RoiSelector(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str, instructions: str, image_bgr: np.ndarray):
         super().__init__(parent)
         self.title(title)
+        self.configure(bg=theme.current["bg"])
         self.result = None
         self._rect = None
         self._origin = (0, 0)
@@ -129,7 +135,8 @@ class RoiSelector(tk.Toplevel):
         ttk.Label(self, text=instructions, wraplength=max(420, disp_w), justify="left").pack(
             anchor="w", padx=10, pady=(10, 6))
 
-        self.canvas = tk.Canvas(self, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair")
+        self.canvas = tk.Canvas(self, width=disp_w, height=disp_h, highlightthickness=1, cursor="crosshair",
+                                highlightbackground=theme.current["border"], bg=theme.current["bg"])
         self.canvas.pack(padx=10)
         self.canvas.create_image(0, 0, anchor="nw", image=self._photo)
         self.canvas.bind("<ButtonPress-1>", self._press)
@@ -144,6 +151,7 @@ class RoiSelector(tk.Toplevel):
         self.hint = ttk.Label(bar, text="Drag with the left mouse button to draw a box.")
         self.hint.pack(side="left")
 
+        theme.set_titlebar_dark(self, theme.current is theme.DARK)
         self.transient(parent)
         self.attributes("-topmost", True)
         self.grab_set()
@@ -191,6 +199,44 @@ class RoiSelector(tk.Toplevel):
         return dlg.result
 
 
+class SettingsDialog(tk.Toplevel):
+    """Small window opened from the gear button in the top-right corner: appearance (theme)."""
+
+    OPTIONS = (("system", "Match Windows (default)"), ("light", "Light"), ("dark", "Dark"))
+
+    def __init__(self, app: "App"):
+        super().__init__(app)
+        self.app = app
+        self.title("Settings")
+        self.resizable(False, False)
+        self.transient(app)
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        body = ttk.Frame(self, padding=14)
+        body.pack(fill="both", expand=True)
+        box = ttk.LabelFrame(body, text="Appearance")
+        box.pack(fill="x")
+        for i, (value, label) in enumerate(self.OPTIONS):
+            ttk.Radiobutton(box, text=label, value=value, variable=app.theme_choice,
+                            command=app._on_theme_change).pack(
+                anchor="w", padx=12, pady=(8 if i == 0 else 2, 8 if i == len(self.OPTIONS) - 1 else 2))
+        self.version_label = ttk.Label(body, text=f"AutoFishing v{af.__version__}")
+        self.version_label.pack(anchor="w", pady=(12, 0))
+        ttk.Button(body, text="Close", command=self.destroy).pack(anchor="e", pady=(8, 0))
+
+        self.restyle()
+        self.update_idletasks()
+        x = app.winfo_rootx() + app.winfo_width() - self.winfo_reqwidth() - 16
+        y = app.winfo_rooty() + 8
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.focus_set()
+
+    def restyle(self):
+        self.configure(bg=theme.current["bg"])
+        self.version_label.config(foreground=theme.current["muted"])
+        theme.set_titlebar_dark(self, self.app.mode == "dark")
+
+
 # --------------------------------------------------------------------------- #
 # Main window
 # --------------------------------------------------------------------------- #
@@ -200,11 +246,21 @@ class App(tk.Tk):
         self.title(f"AutoFishing v{af.__version__}")
         self.minsize(940, 720)
 
-        style = ttk.Style(self)
-        style.theme_use("vista" if "vista" in style.theme_names() else "clam")
-        style.configure("Big.TButton", padding=(10, 6))
+        # Window / taskbar icon (the same fishing rod as the .exe). Keep references so Tk doesn't drop them.
+        self._icons = [ImageTk.PhotoImage(img) for img in load_icon_images()]
+        try:
+            self.iconphoto(True, *self._icons)   # True: every later window (dialogs) gets it too
+        except tk.TclError:
+            pass
 
+        self.style = ttk.Style(self)
         self.cfg = af.load_config()
+        choice = self.cfg.get("theme", "system")
+        self.theme_choice = tk.StringVar(value=choice if choice in theme.THEME_CHOICES else "system")
+        self.mode = theme.resolve(self.theme_choice.get())     # "light" or "dark"
+        self.pal = theme.apply(self, self.style, self.mode)
+        self._settings_dlg = None
+        self._last_theme_check = 0.0
         self.template = af.load_template()
         self.detector = autodetect.SubtitleDetector()
         self.bot = None
@@ -222,6 +278,7 @@ class App(tk.Tk):
         self._build_ui()
         self._refresh_windows()
         self._on_mode_change()
+        self._restyle()
         self._register_hotkeys()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(100, self._tick)
@@ -230,9 +287,15 @@ class App(tk.Tk):
     def _build_ui(self):
         pad = {"padx": 10, "pady": 6}
 
-        # Status banner
-        self.banner = tk.Label(self, text="", font=("Segoe UI", 13, "bold"), anchor="w", padx=14, pady=10)
-        self.banner.pack(fill="x")
+        # Status banner, with the settings gear in the top-right corner
+        self.header = tk.Frame(self)
+        self.header.pack(fill="x")
+        self.banner = tk.Label(self.header, text="", font=("Segoe UI", 13, "bold"), anchor="w", padx=14, pady=10)
+        self.banner.pack(side="left", fill="x", expand=True)
+        self.gear = tk.Button(self.header, text="⚙", font=("Segoe UI Symbol", 16), bd=0, relief="flat",
+                              padx=14, cursor="hand2", takefocus=0, command=self._open_settings)
+        self.gear.pack(side="right", fill="y")
+        Tooltip(self.gear, "Settings (appearance)")
 
         body = ttk.Frame(self)
         body.pack(fill="both", expand=True)
@@ -370,11 +433,51 @@ class App(tk.Tk):
         # --- Log
         logf = ttk.LabelFrame(right, text="Log")
         logf.grid(row=2, column=0, sticky="nsew")
-        self.log_box = scrolledtext.ScrolledText(logf, height=10, state="disabled", wrap="word",
-                                                 font=("Consolas", 9))
-        self.log_box.pack(fill="both", expand=True, padx=6, pady=6)
+        logbody = ttk.Frame(logf)
+        logbody.pack(fill="both", expand=True, padx=6, pady=6)
+        # A plain Text + ttk scrollbar (instead of ScrolledText) so the scrollbar follows the theme too.
+        self.log_box = tk.Text(logbody, height=10, state="disabled", wrap="word", font=("Consolas", 9),
+                               relief="flat", borderwidth=0, highlightthickness=1)
+        log_scroll = ttk.Scrollbar(logbody, orient="vertical", command=self.log_box.yview)
+        self.log_box.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side="right", fill="y")
+        self.log_box.pack(side="left", fill="both", expand=True)
 
         self._log("Ready. Hotkeys: F6 start, F7 pause/resume, F8 stop, F9 capture (calibration).")
+
+    # -- appearance (light / dark) ----------------------------------------------
+    def _apply_theme(self):
+        self.mode = theme.resolve(self.theme_choice.get())
+        self.pal = theme.apply(self, self.style, self.mode)
+        self._restyle()
+
+    def _restyle(self):
+        """Repaint everything that isn't a themed ttk widget, after the palette changed."""
+        p = self.pal
+        self.log_box.config(bg=p["log_bg"], fg=p["log_fg"], insertbackground=p["log_fg"],
+                            selectbackground=p["accent"], selectforeground="#ffffff",
+                            highlightbackground=p["border"], highlightcolor=p["accent"])
+        theme.style_popdown(self.win_combo, p)
+        if self._settings_dlg is not None and self._settings_dlg.winfo_exists():
+            self._settings_dlg.restyle()
+        self._update_window_status(force=True)
+        self._refresh()   # banner and gear colours
+
+    def _on_theme_change(self):
+        choice = self.theme_choice.get()
+        self.cfg["theme"] = choice if choice in theme.THEME_CHOICES else "system"
+        try:
+            af.save_config(self.cfg)
+        except OSError:
+            pass
+        self._apply_theme()
+
+    def _open_settings(self):
+        if self._settings_dlg is not None and self._settings_dlg.winfo_exists():
+            self._settings_dlg.lift()
+            self._settings_dlg.focus_set()
+            return
+        self._settings_dlg = SettingsDialog(self)
 
     # -- logging / hotkeys ----------------------------------------------------
     def _log(self, msg: str):
@@ -476,7 +579,7 @@ class App(tk.Tk):
 
         if self.mode_var.get() == "manual":
             self._target_win = None
-            self.win_status.config(text="Manual mode: watching the area you calibrated.", foreground="")
+            self.win_status.config(text="Manual mode: watching the area you calibrated.", foreground=self.pal["fg"])
             self.scale_status.config(text="")
             return
 
@@ -485,11 +588,12 @@ class App(tk.Tk):
         if win is None:
             self.win_status.config(
                 text="✗ No Minecraft window found. Start the game, or pick its window from the list.",
-                foreground="#b91c1c")
+                foreground=self.pal["bad"])
         else:
             how = "chosen by you" if self._pinned_hwnd else "auto-detected"
             self.win_status.config(
-                text=f"✓ {win.title}\n   {win.width}x{win.height}, {win.exe} ({how})", foreground="#15803d")
+                text=f"✓ {win.title}\n   {win.width}x{win.height}, {win.exe} ({how})",
+                foreground=self.pal["ok"])
 
         if running and bot.scale:
             self.scale_status.config(text=f"GUI scale: {bot.scale}x")
@@ -658,6 +762,11 @@ class App(tk.Tk):
             elif evt == "capture" and self._waiting_capture:
                 self._do_capture()
         self._refresh()
+        # "Match Windows": follow the system if the user flips Windows between light and dark.
+        if self.theme_choice.get() == "system" and time.monotonic() - self._last_theme_check > 2.0:
+            self._last_theme_check = time.monotonic()
+            if theme.resolve("system") != self.mode:
+                self._apply_theme()
         self.after(100, self._tick)
 
     def _refresh(self):
@@ -675,8 +784,11 @@ class App(tk.Tk):
             text, key = "No Minecraft window found - start the game, or pick it from the list", "warn"
         else:
             text, key = "Ready - cast your rod, then press Start (F6)", "idle"
-        bg, fg = STATE_COLORS[key]
+        bg, fg = theme.STATE_COLORS[self.mode][key]
+        self.header.config(bg=bg)
         self.banner.config(text=text, bg=bg, fg=fg)
+        self.gear.config(bg=bg, fg=fg, activeforeground=fg,
+                         activebackground=theme.shade(bg, 0.2 if self.mode == "dark" else -0.12))
 
         # Buttons
         idle = not running
@@ -763,6 +875,14 @@ def selftest() -> None:
     found_scale, found_score, _ = detector.best_scale(canvas, (0, 0), range(1, 7))
     assert found_scale == 4 and found_score > 0.9, f"auto-detect failed: scale {found_scale}, score {found_score}"
     assert isinstance(winutil.list_windows(), list), "window listing failed"
+
+    # Appearance + icon: the embedded icon must decode and convert for Tk, and both palettes must be complete.
+    icon_root = tk.Tk()
+    icon_root.withdraw()
+    icons = [ImageTk.PhotoImage(img) for img in load_icon_images()]
+    assert len(icons) == len(ICON_SIZES), "app icon failed to load"
+    icon_root.destroy()
+    assert set(theme.LIGHT) == set(theme.DARK), "light and dark palettes differ"
 
     keyboard.add_hotkey("f6", lambda: None)
     keyboard.unhook_all()
