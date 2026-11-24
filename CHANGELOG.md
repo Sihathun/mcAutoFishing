@@ -9,7 +9,9 @@ Group bullets under **Added**, **Changed**, **Fixed** or **Removed**.
 
 ## [Unreleased]
 
-## [1.1.0-beta.1] - 2026-11-24
+## [1.1.0] - 2026-11-24
+
+Automatic setup, a game window picker, dark mode and a new icon.
 
 ### Added
 - **Automatic setup: no more calibrating.** Turn on subtitles, press Start, and cast. The app finds your Minecraft window and learns your in-game GUI size from the first "Fishing Bobber splashes" bite, then reels that fish in and remembers the size for next time.
@@ -17,11 +19,18 @@ Group bullets under **Added**, **Changed**, **Fixed** or **Removed**.
 - **Setup status at a glance:** the app shows which window it is using, and whether your GUI size is known or still being learned.
 - It re-learns the GUI size automatically if you resize the game window or change the GUI scale in Minecraft's video settings.
 - Clear status messages when there is no Minecraft window, or when it is minimized or can't be captured.
+- **Dark mode.** Click the **⚙** gear in the top-right corner, then choose **Appearance**: *Match Windows* (the default, it follows your Windows light/dark setting), *Light* or *Dark*. The whole app and the window title bar switch instantly, and your choice is remembered.
+- **New app icon:** the fishing rod logo now appears on `AutoFishing.exe`, in the window's title bar, on the taskbar and in Alt+Tab.
 
 ### Changed
 - The "only click while Minecraft is focused" safety net now follows the game window itself instead of matching its title. Modpacks that rename the window (for example "COBBLEVERSE") no longer risk blocking clicks.
 - Manual calibration is now an advanced option (choose **Manual calibration**), for non-English games or font resource packs. Existing manual calibrations keep working.
 - The command-line `run` also uses automatic setup, so it no longer needs calibrating first.
+- Slightly darker green and grey text in light mode, so it is easier to read.
+
+### Notes
+- Automatic setup understands the English text in the default Minecraft font. For other languages or font resource packs, use **Manual calibration**.
+- The Minecraft window must be visible on screen (not covered or minimized) so it can be watched.
 
 ## [1.0.0] - 2026-11-24
 

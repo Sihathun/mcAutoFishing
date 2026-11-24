@@ -42,7 +42,7 @@ try:
 except ImportError:  # very old mss
     ScreenShotError = Exception
 
-__version__ = "1.1.0-beta.1"
+__version__ = "1.1.0"
 
 
 def _data_dir() -> Path:
@@ -66,6 +66,7 @@ TEMPLATE_PATH = DATA_DIR / "template.png"
 SCREENSHOT_PATH = DATA_DIR / "calibration_screenshot.png"
 
 DEFAULTS = {
+    "theme": "system",        # GUI appearance: "system" (follow Windows), "light" or "dark"
     "mode": "auto",           # "auto" = find the game window + GUI scale itself, "manual" = use the calibration below
     "target_window": None,    # {"exe", "cls", "title"} of a window the user picked from the list (None = auto-detect)
     "gui_scale": None,        # GUI scale learned in auto mode (reused while the window size stays the same)
